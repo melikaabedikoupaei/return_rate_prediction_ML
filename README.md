@@ -1,7 +1,6 @@
 # ml23-team05
 
 ### Introduction
-Welcome to our project! This is an In-class Kaggle Competition. We are the team 5. 
 In this project, we are dealing with product return rate. Product return is a tricky thing in real life. It not only adds extra cost for the retailers but also trigger environmental issue. Here, we are using four weeks of sales and return data to predict individual product yearly return rates.
 
 Dealing with missing values, our aim is to impute as many as possible variables in order to keep the full information from the raw dataset(Details see 01_Data_Cleaning.R). Thanks to this, we are able to keep most available data (5827) to train and to evaluate models. Additionally, we created 13 new features (more details see 02_Feature_Engineering.R). It shows that some created variables have highly importance for the modeling (See the poster.pdf)
