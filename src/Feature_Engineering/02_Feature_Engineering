@@ -1,0 +1,350 @@
+### loading library
+library('tidyr')
+library('dplyr')
+library(lubridate)
+
+### load tables
+getwd()
+# set your directory here
+setwd("C:/Users/Asus/Desktop/master/sem3/ML/project")
+getwd()
+sales_yr1_cleaned <- read.csv("cleaned_sales_yr1.csv")
+sales_yr2_cleaned <- read.csv("cleaned_sales_yr2.csv")
+products_cleaned <- read.csv("cleaned_products.csv")
+predictions <- read.csv("predictions.csv")
+
+### look at tables
+class(predictions)
+predictions <- select(predictions,"pid")
+class(predictions)
+head(sales_yr1_cleaned)
+str(sales_yr1_cleaned)
+
+# Rename date_id
+colnames(sales_yr1_cleaned)[colnames(sales_yr1_cleaned) == "date_id"] <- "date"
+colnames(sales_yr2_cleaned)[colnames(sales_yr2_cleaned) == "date_id"] <- "date"
+
+#Make sure dates are represented correctly
+sales_yr1_cleaned$date <- as.Date(sales_yr1_cleaned$date,'%Y-%m-%d')
+sales_yr2_cleaned$date <- as.Date(sales_yr2_cleaned$date,'%Y-%m-%d')
+str(sales_yr1_cleaned)
+str(sales_yr2_cleaned)
+
+
+###feature engineering
+# 01 dealing with y varialbe, yearly return rate
+
+# return rate function
+returnrate <- function(sales_df){
+  
+  ## Add total_returned
+  returns <- sales_df %>% 
+    filter(net_sales_amount <= 0) %>%
+    group_by(pid) %>% 
+    summarise(total_returned = sum(net_sales_amount))
+  
+  ## Add total_sold
+  sold <- sales_df %>% 
+    filter(net_sales_amount >= 0) %>%
+    group_by(pid) %>% 
+    summarise(total_sold = sum(net_sales_amount)) 
+  
+  ## Create df with return_rate 
+  df <- returns %>% 
+    full_join(sold,by = 'pid') %>%
+    mutate_if(is.numeric,coalesce,0) %>% #replace missing values with 0
+    mutate(return_rate = -total_returned/total_sold)
+  
+  ## Replace NaN with 0 (instances where total_sold = 0)
+  df$return_rate[sapply(df$return_rate,is.nan)] <- 0
+  
+  ## Make return rate = 1 for instances with returns > sold 
+  df$return_rate[df$return_rate>1] <- 1
+  
+  return(df)
+}
+
+# Calculate yearly return_rate
+yearly_return_rate <- returnrate(sales_yr1_cleaned)
+View(yearly_return_rate)
+
+# Rename return_rate to yearly_return_rate
+colnames(yearly_return_rate)[colnames(yearly_return_rate) == "return_rate"] <- "yearly_return_rate"
+View(yearly_return_rate)
+
+yearly_return_rate <- yearly_return_rate[,c("pid","yearly_return_rate")]
+View(yearly_return_rate)
+
+# 02 dealing with x varialbes
+# (1) the first 4 weeks after product has been introduced function
+filter_fourweeks <- function(sales_df){
+  
+  period_per_pid <- sales_df %>%
+    filter(net_sales_amount>0) %>%
+    group_by(pid) %>%
+    summarise(first_sale = min(date),
+              four_weeks_later = first_sale + weeks(4))
+  
+  df_filtered_fourweeks <- sales_df %>%
+    left_join(period_per_pid, by = 'pid') %>%
+    filter(date >= first_sale & date <= four_weeks_later) %>%
+    select(-c(first_sale,four_weeks_later))
+  
+  return(df_filtered_fourweeks)
+}
+
+# aplly funcion and get the first 4 weeks data set 
+sales_yr1_fourweeks <- filter_fourweeks(sales_yr1_cleaned)
+sales_yr2_fourweeks <- filter_fourweeks(sales_yr2_cleaned)
+
+## merge products info to first 4 weeks and calcuate its first 4 weeks total sold, total returned and return rate
+train_df <- left_join(returnrate(sales_yr1_fourweeks),products_cleaned,by = 'pid') 
+View(train_df)
+nrow(train_df)
+
+# do the same in the test set
+class(predictions)
+test_df <-left_join(predictions,returnrate(sales_yr2_fourweeks),by = 'pid')
+View(test_df)
+
+test_df <-left_join(test_df,products_cleaned,by = 'pid')
+View(test_df)
+nrow(test_df)
+
+## (2) Add time of introduction of product divide by 365 and 3 month
+
+# introduction function
+introduction <- function(sales_df){
+  
+  #store year as a character & calculate first day of the year
+  year <- as.character(format(sales_df$date[1],'%Y'))
+  first_day <- as.Date(paste('01-01',year,sep = '-'),'%d-%m-%Y')
+  
+  #get date of introduction for each product & calculate fraction
+  introduction_df <- sales_df %>%
+    filter(net_sales_amount >= 0) %>%
+    group_by(pid) %>% # this way, all following actions will be performed on the pid groups instead of the whole dataset
+    summarise(introduction_time = as.numeric(min(date)-first_day)/365,
+              introduction_season = round((as.numeric(min(date)-first_day)/120),0),
+              )
+  
+  #possible to check if leap year, but would not make a large difference
+  return(introduction_df)
+}
+
+# merge with train and test tables
+train_df <- train_df %>% 
+  left_join(introduction(sales_yr1_fourweeks),by = 'pid') 
+test_df <- test_df %>%
+  left_join(introduction(sales_yr2_fourweeks),by = 'pid')
+View(train_df)
+
+# (3) first_return: the ratio = (days between introduction & first return) /365
+# function
+first_return <- function(sales_df){ 
+  
+  #get date of introduction for each product
+  introduction_df <- sales_df %>%
+    filter(net_sales_amount >= 0) %>%
+    group_by(pid) %>% 
+    summarise(introduction = min(date))
+  
+  return_df <- sales_df %>%
+    filter(net_sales_amount <= 0) %>%
+    group_by(pid) %>% 
+    summarise(return = min(date))
+  
+  first_return_df <- introduction_df %>% 
+    left_join(return_df,by = 'pid') %>%
+    mutate(first_return = (as.numeric(return-introduction))/365) %>% 
+    select(pid,first_return) %>%
+    mutate_if(is.numeric,coalesce,0) #replace na with 0 
+  
+  return(first_return_df)
+}
+
+# merge with train and test tables
+train_df <- train_df %>% 
+  left_join(first_return(sales_yr1_fourweeks),by = 'pid') 
+test_df <- test_df %>%
+  left_join(first_return(sales_yr2_fourweeks),by = 'pid')
+View(train_df)
+
+## (4) channel parameters
+# number of unique channel for each pid
+unique_channel <- function(sales_df){ 
+  unique_channels <- sales_df %>%
+    group_by(pid) %>%
+    summarise(unique_channel_count = n_distinct(channel))
+  return(unique_channels)
+}
+
+# merge with train and test tables
+train_df <- train_df %>% 
+  left_join(unique_channel(sales_yr1_fourweeks),by = 'pid') 
+test_df <- test_df %>%
+  left_join(unique_channel(sales_yr2_fourweeks),by = 'pid')
+View(train_df)
+View(test_df)
+
+
+# (5) online and offline sales
+# online saltes function
+online_sale <- function(sales_df){ 
+  online_sale <- sales_df %>%
+    filter(channel == 'online') %>%
+    group_by(pid) %>%
+    summarise(
+      online_sales = sum(ifelse(net_sales_amount > 0, net_sales_amount, 0)),
+      online_return = sum(ifelse(net_sales_amount < 0, net_sales_amount, 0))
+    )
+  return(online_sale)
+}
+
+# offline sales function
+offline_sale <- function(sales_df){ 
+  offline_sale <- sales_df %>%
+    filter(channel != 'online') %>%
+    group_by(pid) %>%
+    summarise(
+      offline_sales = sum(ifelse(net_sales_amount > 0, net_sales_amount, 0)),
+      offline_return = sum(ifelse(net_sales_amount < 0, net_sales_amount, 0))
+    )
+  return(offline_sale)
+}
+
+# merge with train and test tables
+train_df <- train_df %>% 
+  left_join(online_sale(sales_yr1_fourweeks),by = 'pid') 
+test_df <- test_df %>%
+  left_join(online_sale(sales_yr2_fourweeks),by = 'pid')
+View(train_df)
+
+train_df <- train_df %>% 
+  left_join(offline_sale(sales_yr1_fourweeks),by = 'pid') 
+test_df <- test_df %>%
+  left_join(offline_sale(sales_yr2_fourweeks),by = 'pid')
+View(train_df)
+
+# (6) online_percentage
+train_df$online_percentage <- 
+  ifelse(is.na(train_df$online_sales), 0, (train_df$online_sales / train_df$total_sold))
+test_df$online_percentage <- 
+  ifelse(is.na(test_df$online_sales), 0, (test_df$online_sales / test_df$total_sold))
+View(train_df)
+
+# another col to add is completely sales in store or completely or both
+train_df <- train_df %>%
+  mutate(SO = case_when(
+    online_percentage == 0 ~ 0,    # only offline sales
+    online_percentage==1 ~ 1,      # only online sales
+    online_percentage!=1 & online_percentage != 0 ~ 2,   # both online and offline sales
+  ))
+
+
+test_df <- test_df %>%
+  mutate(SO = case_when(
+    online_percentage == 0 ~ 0,
+    online_percentage==1 ~ 1,
+    online_percentage!=1 & online_percentage != 0 ~ 2,
+  ))
+
+
+# (7) Dealing with NA values
+# show the na values in each columns
+colSums(is.na(train_df))
+colSums(is.na(test_df))
+
+# Fill NA values with 0  in train_df
+train_df$online_sales[is.na(train_df$online_sales)] <- 0
+train_df$offline_sales[is.na(train_df$offline_sales)] <- 0
+train_df$online_return[is.na(train_df$online_return)] <- 0
+train_df$offline_return[is.na(train_df$offline_return)] <- 0
+train_df$online_percentage[is.na(train_df$online_percentage)] <- 0
+colSums(is.na(train_df))
+
+# Fill NA values with 0 in test_df
+test_df$online_sales[is.na(test_df$online_sales)] <- 0
+test_df$offline_sales[is.na(test_df$offline_sales)] <- 0
+test_df$online_return[is.na(test_df$online_return)] <- 0
+test_df$offline_return[is.na(test_df$offline_return)] <- 0
+test_df$online_percentage[is.na(test_df$online_percentage)] <- 0
+test_df$introduction_time[is.na(test_df$introduction_time)] <- 0
+test_df$introduction_season[is.na(test_df$introduction_season)] <- 0
+test_df$first_return [is.na(test_df$first_return )] <- 0
+test_df$unique_channel_count[is.na(test_df$unique_channel_count)] <- 0
+test_df$total_returned[is.na(test_df$total_returned)] <- 0
+test_df$total_sold[is.na(test_df$total_sold)] <- 0
+test_df$return_rate[is.na(test_df$return_rate)] <- 0
+colSums(is.na(test_df))
+
+# (8) add other col here to show relation between number of sold and return
+# show
+View(train_df)
+View(test_df)
+train_df$total_returned <-train_df$total_returned *-1
+test_df$total_returned <-test_df$total_returned *-1
+View(train_df)
+View(test_df)
+
+# encode different level 
+train_df <- train_df %>%
+  mutate(SR = case_when(
+    total_sold == 0 & total_returned == 0 ~ 0,                # no sales and no returned
+    total_sold == 0 & total_returned != 0 ~ 1,                # no sales but have returned
+    total_sold < total_returned & total_sold != 0 ~ 2,        # the number of sales is less than the return
+    total_sold == total_returned ~ 3,                         # the number of sales is equal to the return
+    total_sold > total_returned & total_returned != 0 ~ 4,    # the number of sales is more than the reurn
+    total_sold > total_returned & total_returned == 0 ~ 5,    # only sales and no return
+  ))
+test_df <- test_df %>%
+  mutate(SR = case_when(
+    total_sold == 0 & total_returned == 0 ~ 0,
+    total_sold == 0 & total_returned != 0 ~ 1,
+    total_sold < total_returned & total_sold != 0 ~ 2,
+    total_sold == total_returned ~ 3,
+    total_sold > total_returned & total_returned != 0 ~ 4,
+    total_sold > total_returned & total_returned == 0 ~ 5,
+  ))
+
+# show
+View(train_df)
+nrow(train_df)
+
+# (9) reorder the columns
+colnames(train_df)
+new_order=c("pid","brand","season","category","subcategory","subsubcategory","numeric_size","count_size",
+            "price","total_sold","total_returned","offline_sales", "offline_return","online_sales","online_return",
+            "online_percentage","unique_channel_count","SR","SO","introduction_time","introduction_season","first_return","return_rate")
+
+# show
+train_df <- train_df[, new_order]
+test_df <- test_df[, new_order]
+
+# (10) merge the yearly return_rate to training set
+train_df <- left_join(train_df,yearly_return_rate,by = 'pid')
+colSums(is.na(train_df))
+View(train_df)
+
+# (11) split the train and validation set
+# Set a seed for reproducibility
+set.seed(123)
+
+# Generate random indices for splitting
+indices <- sample(1:nrow(train_df), size = nrow(train_df), replace = FALSE)
+
+# Calculate the number of rows for the training set (70%)
+train_size <- round(0.7 * nrow(train_df))
+
+# Create the training set
+train <- train_df[indices[1:train_size], ]
+
+# Create the validation set
+validation <- train_df[indices[(train_size + 1):nrow(train_df)], ]
+
+
+## Write
+write.csv(na.omit(train), "train.csv", row.names=FALSE)
+write.csv(na.omit(validation ), "validation.csv", row.names=FALSE)
+write.csv(na.omit(test_df), "test.csv", row.names=FALSE)
+
